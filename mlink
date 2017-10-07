@@ -1,0 +1,55 @@
+#!/usr/bin/php -q
+<?
+// Version 1.0
+//
+// mlink [filename] [directory] ... [directoryN]
+//
+// This will hardlink the given file to the directories specified,
+// automatically prepending the source and destination directories with
+// The ones specified here.  If you would like to specify full directories
+// all the time, set presource and predest to "".
+//
+// This is meant to save time hardlinking one-of movies to multiple directories
+// at once.
+// 
+// With prepend directories specified the command becomes (from source dir):
+//
+// $ mlink 'The Incredibles.mp4' Animation Comedy Family Fantasy
+// 
+// much easier :)
+// ----------------------------------------------------------------------------
+// Default pre-pend directory variables
+// Be SURE to add trailing "/"
+
+// The destination (genre) directory, or "" if you want to use full paths
+$predest = "";
+// The source (movie location) directory, or "" if you want to use full paths
+$presource = "";
+// ----------------------------------------------------------------------------
+
+$usage = "\nmlink [filename] [directory] ... [directoryN]\n\nhardlinks a file to mulitple directories at the same time\n\n";
+
+// check to make at least 3 arguments were passed, otherwise error
+if( $argc < 3 ) { die("$usage"); }
+
+// grab the sourcefile, and create an array of directories to check
+$sourcefile = $argv[1];
+$directories = array();
+for( $i = 2; $i < $argc; $i++ ) { array_push($directories,$argv[$i]); }
+
+echo "\nLinking file: $sourcefile\n";
+
+// verify that the file is real, otherwise throw error
+if( !is_file("$presource$sourcefile") ) { die("\n\nInvalid source file to hardlink\n$usage"); }
+
+// go through and hardlink into those directories, notify if error, but do not die.
+foreach( $directories as $dir ) { 
+  if( !is_dir("$predest$dir") ) { echo "\nInvalid directory specification: $predest$dir.  Skipping."; }
+
+  // add a trailing / if it does not exist
+  if( substr($dir,-1) != "/" ) { $dir = $dir . "/"; }
+
+  // hardlink it
+  system("ln -fv \"$presource$sourcefile\" \"$predest$dir\"");
+}
+?>

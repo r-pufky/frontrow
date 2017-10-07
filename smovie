@@ -1,0 +1,468 @@
+#!/usr/bin/perl -w
+#
+# Version 1.0
+#
+# smovie - links movies to given genres
+#
+# This symlinks movies to their appropriate genres, as listed by imdb.com.  This
+# will automatically download the appropriate filelist from imdb if needed, or
+# if forced.
+#
+# The only things that you should change are in the box (----).  Everything else
+# should need no modification.  Additionally, these should probably only be
+# changed if you consistently use different directories.
+#
+# Try a smovie --help :)
+#
+use strict;
+# -----------------------------------------------------------------------------
+# Default Options To Change
+# The location the imdb data file to use, or where to store it
+my $location = "/tmp/genres.list";
+# The store location of the genres directories (where the genre directories are
+# stored).  This must have a trailing /
+my $store = "/Volumes/Movies/";
+# How old does the list file have to be to force update it?  (this should be at
+# a MINIMUM of 1 week.  604800 seconds)
+my $cachetime = 604800;
+# Default behavior when linking files.  0 = hardlinks, 1 = symlinks
+my $symlink = 0;
+# -----------------------------------------------------------------------------
+
+use Getopt::Long;
+use File::stat;
+
+# get/verify commandline options
+my $source = processoptions(\$location,\$store,\$cachetime, \$symlink);
+
+# update the cache if it needs to be, on error die with message
+if( ! updatelist($location,$cachetime) ) { print "ERROR: General Failure: Unable to update cache\n"; exit 1; }
+
+# load the genrelist for processing
+my @genrelist = loadgenrelist($location);
+
+# update the genres destination directory
+updategenres($location,$store);
+
+# load the movies to process
+my @movies = loadmovies($source);
+
+# go through each movie
+my (@genres, $fullpathmovie, $movietitle, $currentgenre);
+foreach (@movies) {
+  # grab the fullpath to the movie, and associated genres with it
+  $fullpathmovie = $_;
+  @genres = getmoviegenres($fullpathmovie,\@genrelist);
+
+  # if there were genres returned
+  if( scalar @genres != 0 ) {
+    # grab just the movie title for linking
+    $movietitle = $fullpathmovie;
+    $movietitle =~ s/(.*\/{1})(.*)$/$2/;
+    print "\nMovie: $movietitle";
+    # link the movie to each of the genres
+    foreach (@genres) {
+      # for readability
+      $currentgenre = $_;
+      # print / link the files.
+      printf "\n    %12s: Linking '%s' '%s'", $currentgenre, $fullpathmovie, "$store$currentgenre/$movietitle";
+      if( $symlink ) {
+        `/bin/ln -sf "$fullpathmovie" "$store$currentgenre/$movietitle"`;
+      } else {
+        `/bin/ln -f "$fullpathmovie" "$store$currentgenre/$movietitle"`;
+      }
+    }
+  } else {
+    print @genres;
+    print "\nSKIP: Nothing found for $fullpathmovie";
+  }
+}
+
+print "\n\ndone.\n";
+
+
+# -----------------------------------------------------------------------------
+# Public Function Declarations
+# -----------------------------------------------------------------------------
+# Function: processoptions
+# Purpose:  validates the options passed to the program
+# Requires: location  - string reference containing the location of the 
+#                       genres.list file
+#           store     - string reference containing the location of the store 
+#                       directory
+#           cachetime - integer reference containing the cache TTL
+# Returns:  string    - containing the verified location of the source 
+#                       directory / file
+# Mutators: location, store, cachetime
+sub processoptions {
+  # location, store, cachetime are passed by reference.
+  my ($force, $source, $storeloc, $cache, $help, $link) = undef;
+  
+  # verify that options passed were valid options, otherwise print error message
+  if( ! GetOptions("force" => \$force,
+                   "source-list:s" => \$source,
+                   "store:s" => \$storeloc,
+                   "cache:i" => \$cache,
+                   "help" => \$help,
+                   "link" => \$link) ) { 
+    print _getusage();
+    exit 1;
+  }
+  
+  # if help is requested, die with message
+  if( $help ) { print _getusage(); exit 0; }
+
+  # update cache time, force options
+  if( $cache ) { $cachetime=$cache; }
+  if( $force ) { $cachetime=0; }
+  if( $link ) { $symlink=1; }
+  
+  # update source if it was set and is a valid location.
+  if( $source ) {
+    if( ! -r "$source" ) { 
+      print "ERROR: source: $source not readable!\n"; 
+      exit 1;
+    }
+    $location = $source;
+  }
+  
+  # update store if it was set and is a valid directory.
+  if( $storeloc ) {
+    if( $storeloc !~ /.*\/$/ ) { 
+        print "ERROR: store location must have trailing /\n";
+        exit 1;
+    }
+    if( ! -d $storeloc ) {
+      print "ERROR: store: $storeloc not a valid directory!\n";
+      exit 1;
+    }
+    $store = $storeloc;
+  }
+
+  # If there isn't 1 unprocessed option, error out (no file/dir passed)
+  if( $#ARGV == -1 ) {
+    print "ERROR: A file or directory was not specified to process.\n";
+    exit 1;
+  } else {
+    # if the argument is a directoy, make sure it has a trailing /
+    if( -d $ARGV[0] ) {
+      if( $ARGV[0] !~ /.*\/$/ ) { 
+        print "ERROR: directory must have trailing /\n";
+        exit 1;
+      }
+    # else make sure it is a file
+    } elsif ( ! -e $ARGV[0] ) {
+      print "ERROR: The file or directory specified does not exist!\n";
+      exit 1;
+    }
+  }
+  return $ARGV[0];
+}
+
+
+# Function: updatelist
+# Purpose:  updates the list cache if it is expired or non-existant.  Pass 0 to 
+#           cachetime to force update.
+# Requires: location  - string location of where the list is stored
+#           cachetime - integer amount of time passed for the cached list to be
+#                       automatically updated
+# Returns:  boolean   - true if success, false if failure
+sub updatelist {
+  my $location = shift;
+  my $cachetime = shift;
+  my $error = 0;
+ 
+  # if the file does not exists, update the cache
+  if( ! -e "$location" ) { 
+    print "$location not found.  Forcing re-sync.\n";
+    $error = _updatecache($location);
+  # if not, check to see if it is expired, if so, update it
+  } else {
+    # grab the file information
+    my $file = stat("$location");
+    # if the file is out of date, update it.
+    if( (time() - $file->ctime) > $cachetime ) {
+      print "$location is out of date.  Forcing re-sync.\n";
+      $error = _updatecache($location);
+    }
+  }
+
+  if( $error ) {
+    return $error;
+  } else {
+    return 1;
+  }
+}
+
+
+# Function: updategenres
+# Purpose:  updates the internal genre list from the current one in the cache
+# Requires: location - string location of the cache file to use
+#           store    - string root location of the genre stores
+# Returns:  none
+sub updategenres {
+  my $location = shift;
+  my $store = shift;
+
+  print "\nUpdating genre directories in $store...";
+  # used to hold parsed genres to use, start undefined
+  undef my @genres;
+
+  # grab the location of the start of the genre list
+  my @temp = `/usr/bin/grep -n -m1 'Breakdown' "$location" | 
+              cut -f1 -d':' `;
+  my $begin = $temp[0] + 1;
+  
+  # grab the end of the lists
+  @temp = `/usr/bin/grep -n -m2 '4: The Genres' "$location" | 
+           /usr/bin/sed -e '1d' | cut -f1 -d':' `;
+  my $end = $temp[0] - 2;
+  my $length = $end - $begin;
+
+  # grab the lines inbetween that, and store in our genres variable. 
+  my @genreslist = `/usr/bin/head -$end "$location" | 
+                    /usr/bin/tail -$length `;
+ 
+  # go through and make each genre directory if needed
+  foreach my $genreline (@genreslist) {
+    # split off the end of the line (we only need the first one)
+    my @genresplit = split("\t",$genreline);
+    my $genre = $genresplit[0];
+
+    # trim off any whitespace from begining / end
+    $genre =~ s/^\s*(.*?)\s*$/$1/;
+    
+    # create dir if it does not exist already, die if we can't create it.
+    if( ! -d "$store$genre" ) {
+      print "$store$genre does not exist!  creating...\n";
+      if( system("/bin/mkdir '$store$genre' > /dev/null 2>&1") != 0 ) { 
+        print "ERROR: Could not create genre directory: $store$genre\n"; 
+        exit 1; 
+      }
+    }
+  }
+  print " done.";
+}
+
+
+# Function: loadmovies
+# Purpose:  loads the files specified by the $source command line option
+# Requires: source - string that contains either the file or directory to
+#                    process
+# Returns:  array  - list of movies to process, with their full path
+sub loadmovies {
+  my $source = shift;
+  my @movies;
+  
+  # if the source is a directory
+  if( -d "$source" ) {
+    # grab a list of files in that directory
+    my @list = `ls -1 "$source" `;
+    my $line;
+    foreach (@list) {
+      # create the whole file name, without newline
+      $line = $source . $_;
+      $line =~ s/(.*)\n/$1/;
+      # add to array if the file exists
+      if( -e "$line" ) { push(@movies,$line); }
+    }
+  # else it is a file, check to make sure, and push it on the array
+  } elsif( -e "$source" ) {
+    # just add it to the array with a full path
+    push(@movies,$source);
+  } else { 
+    print "ERROR: Invalid file or directory: $source\n";
+    exit 1;
+  }
+  return @movies;
+}
+
+
+# Function: getmoviegenres
+# Purpose:  Gets a list of genres for a movie specified.
+# Requires: string - the movie title to search for
+#           array  - reference to the list of genres to use
+# Returns:  array  - contains the genres for that movie
+sub getmoviegenres {
+  my $movietitle = quotemeta(_cleanmoviename(shift));
+  my $genrelist = shift;
+  
+  my @genres = ();
+  my $lastyear = undef;
+  
+  # grab the tokens from each movie-genre in the file after begin
+  foreach (@{$genrelist}) {
+    # only process tokens if the movie type is missing
+    # The movietype is blank for movies, set for everything else
+    # 0 - title, 1 - year, 2 - genre
+    if( my @tokens = /^\s*((?i)$movietitle)\s+\(([0-9]{4})\)\s+[^\(.+\)]\s+(.+)/ ) {
+      # if the last year was not set, set it to current one
+      if( ! $lastyear ) { $lastyear = $tokens[1]; }
+
+      # add the genre to the genre array
+      push(@genres,$tokens[2]);
+
+      # if the last year is different from the current year, abort
+      if( $lastyear != $tokens[1] ) { 
+        print "\nSKIP: Multiple years found for title: " . $tokens[0];
+        # return blank array
+        return @genres = ();
+      }
+    }
+  }
+  return @genres;
+}
+
+
+# Function: loadgenrelist
+# Purpose:  Caches the entire genrelist in an array for fast processing
+# Requires: location  - string location of genres.list file to use           
+# Returns:  genrelist - reference to an array to store the loaded list
+sub loadgenrelist {
+  my $location = shift;
+  my @genrelist;
+
+  print "\nloading movie genre list...";
+  
+  # grab the begining of the actual movie list
+  my $begin = `/usr/bin/grep -n '8: THE GENRES LIST' '$location' | cut -f1 -d':'`;
+  $begin += 3;
+
+  # open the file for reading
+  open(FILE,$location);
+  my $index=0;
+  
+  # grab only the movie-genre lines from the file and return
+  while( my $line = <FILE> ) {
+    $index++;    
+    if( $index >= $begin ) { push(@genrelist,$line); }
+  }
+  close(FILE);
+  print " done.";
+  return @genrelist;
+}
+
+
+# -----------------------------------------------------------------------------
+# Private Function below
+# -----------------------------------------------------------------------------
+# Function: _addgenrestring
+# Purpose:  This adds a given string to the end of the passed string, with 
+#           comma.  If the string is blank, no comma is added.
+# Requires: gstring - string to be added to
+#           genre   - the string to add onto genresstring
+# Returns:  string - the new gstring
+sub _addgenrestring {
+  my $gstring = shift;
+  my $genre = shift;
+  
+  # if the genrestring is blank, just add the string; else add with comma
+  if( $gstring =~ /^$/ ) {
+    $gstring = $genre;
+  } else {
+    $gstring = $gstring . "," . $genre;
+  }
+  return $gstring;
+}
+  
+
+# Function: _cleanmoviename
+# Purpose:  'cleans' the movie name, to the format of an imdb title.  qualifers
+#           are removed and placed at the end of the movie title, i.e. The 
+#           Incredibles in imdb is listed as Incredibles, The.  Remove this 
+#           qualifiers from the movie string to create accruate search hits.
+# Requires: name - string the movie title to clean
+# Returns:  name - the 'cleaned' movie title
+sub _cleanmoviename {
+  my $name = shift;
+
+  # remove full path, then extension, then the [] if any, then extra whitespace
+  $name =~ s/.*\/(.*)$/$1/;
+  $name =~ s/^(.*)\.{1}.*$/$1/;
+  $name =~ s/^(.*)\[.*\]$/$1/;
+  $name =~ s/^\s*(.*?)\s*$/$1/;
+  my $original = $name;
+  
+  # qualifiers where generated with the following perl regex in a simple program
+  # my @tokens = /^\w+,\s{1}([A-Z]{1}[a-z']{0,2})\s{1}\(\d{4}\)/;
+  # This was left as a 'constant' because this shouldn't change much as our 
+  # current sample size is about 700,000 movies.  This removes the qualifiers 
+  # from the begining, and adds them to the end in the format: ', <qualifier>'
+  if( $name =~ s/^(A|Al|An|Ang|As|Az|Da|Das|De|Den|Der|Det|Di|Die|Du|Eat|Een|Egy|Ein|El|Els|En|Et|Ett|Gli|God|Ha'|Het|Huh|I|Il|Inc|Joe|L'|La|Las|Le|Les|Lo|Los|Ltd|Man|Mom|O|Oi|Os|Pai|Roe|Run|T'|Ta|Tha|The|To|Too|Un|Un'|Una|Uno|Y)\s+(.*)/$2, $1/ ) {
+    return $name;
+  } else {
+    return $original;
+  }
+}
+
+  
+# Function: _updatecache
+# Purpose:  updates the cache file from the imdb source on the internet
+# Requires: location - string location to place the updated file
+# Returns:  boolean  - true if success, false if failure
+sub _updatecache {
+  my $location = shift;
+
+  print "\nRe-syncing $location...\n";
+
+  # curl the new file to tmp directory
+  if( system("/usr/bin/curl --progress-bar --output /tmp/genres.lists.gz ftp://ftp.fu-berlin.de/pub/misc/movies/database/genres.list.gz") != 0 ) { return 0 };
+  print "Decompressing and moving file...";
+  if( system("/usr/bin/gzip -f -d -v /tmp/genres.lists.gz 2>/dev/null;
+              cp -f /tmp/genres.lists \"$location\" 2>/dev/null") != 0 ) { return 0 };
+  print " done.";
+  return 1;
+}
+
+
+# Function: _getusage
+# Purpose:  generates the usage message string; at bottom of file for ease of
+#           finding
+# Requires: none
+# Returns:  string - pre-formatted string that contains the usage message.
+sub _getusage {
+  return "
+  smovie <OPTIONS> [file|directory]
+
+  This program will classify a movie into genre directories by looking up the
+  given movie (without the file extenstion) in the imdb database and sym-linking
+  that movie to a directory containing genre directories.  This genre directory is
+  automatically populated with the current genres in the imdb database.
+  
+  OPTIONS:
+
+  --help                  This message.
+
+  --force                 Forces the imdb database to be re-synced from the imdb
+                          servers.  The same as setting the --cache=0 option.  
+  
+  --symlink               Use symlinks instead of hardlinks when linking files.
+  
+  --source-list=<file>    Specifies a different genres.list file.
+                         
+                          *default source: $location
+  
+  --store=<dir>           Specifies a different destination directory for the
+                          genre directories.
+                          
+                          NOTE: Directories *MUST* end in a /
+                          
+                          *default store: $store
+  
+  --cache=<seconds>       Time in seconds to keep cache genres.list file before
+                          re-syncing from the imdb servers.  This is superceeded
+                          by the --force option.  This should be set to 
+                          something *HIGH*, like a week or two.
+
+                          Movies don't update that often, and the download is
+                          currently ~7MB's.  Don't hammer imdb servers.
+                          
+                          *default cache: $cachetime
+  
+  [File|Directory]        The file or directory to create links from.  It is
+                          not restricted to full pathnames, but you should use 
+                          them.  Directories *SHOULD* contain only movies that
+                          you want to link; as any normal file will be linked.
+                          
+                          NOTE: Directories *MUST* end in a /\n\n";
+}

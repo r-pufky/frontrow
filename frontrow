@@ -1,0 +1,298 @@
+#!/usr/bin/python
+#
+# Frontrow file managler for OS X
+#
+# This is a set of utilities to assist in organizing media for the frontrow
+# application.
+#
+
+# Done:
+# __IdentifyKeyValue: tested.
+# __IdentifyFile: tested.  1 BUG. (mp4's don't check)
+# TagFile: tested.
+#
+# We need to pass full path to file functions, and handle munging of functions in main
+# process loop or whatnot
+#
+#
+import os
+import shutil
+import commands
+
+class FrontRowManagler(object):
+  def __init__(self, root_source, root_destination):
+    """ Initialize Frontrow Managler.
+
+    Args:
+      root_source: String location of unsorted videos.
+      root_destination: Strinng location of where to move sorted videos.
+    """
+    self.root_source = root_source
+    self.root_destination = root_destination
+    self.video_formats = {
+        "Microsoft MPEG-4 v2":"mp4v2",
+        "Microsoft MPEG-4 v3":"mp4v3",
+        "Motion JPEG":"mjpeg",
+        "XviD":"XviD",
+        "DivX 5":"DivX5",
+        "DivX 4":"DivX4",
+        "DivX 3 Low-Motion":"DivX3L",
+        "DivX 3 Fast-Motion":"DivX3F",
+        "DivX 3":"DivX3"}
+    self.audio_formats = {
+        "MPEG-1 Layer 3 (stereo":"mp3",
+        "Dolby AC3 (8 channels":"8AC3",
+        "Dolby AC3 (7 channels":"7AC3",
+        "Dolby AC3 (6 channels":"6AC3",
+        "Dolby AC3 (5 channels":"5AC3",
+        "Dolby AC3 (5 channels, 48000 Hz)":"5AC3(48)",
+        "Dolby AC3 (4 channels":"4AC3",
+        "Dolby AC3 (3 channels":"3AC3",
+        "Dolby AC3 (stereo":"AC3",
+        "uncompressed PCM (mono, 8000 Hz)":"MPCM(8)"}
+    self.combine_formats = {
+        "Apple QuickTime movie file (ftyp)":"mp4",
+        "Microsoft ASF":"wmv",
+        "MPEG system stream data":"mpeg",
+        "ISO Media, MPEG v4 system, version 2":"mp4"}
+    self.format_keys = ["video:","audio:"]
+    self.debug = False
+    
+  def SetDebug(self, debug=False):
+    """ Sets debugging for the object
+    
+    Args:
+      debug: A boolean which is True if debugging should be enabled
+    """
+    if debug == True:
+      self.debug = debug
+
+  def SetSource(self, path=None):
+    """ Verifies a path as valid as sets it as the source path
+    
+    Args:
+      path: a string containing the path to the source directory
+    Returns:
+      A boolean which is True if the path was set
+    """
+    if not path or not os.path.exists(path):
+      return False
+    else:
+      self.root_source = path
+      return True
+  
+  def SetDestination(self, path=None):
+    """ Verifies a path as valid and set it as the destination path
+    
+    Args:
+      path: a string containing the path to the destination directory
+    Returns:
+      A boolean which is True if the path was set
+    """
+    if not path or not os.path.exists(path):
+      return False
+    else:
+      self.root_destination = path
+      return True
+ 
+  def LinkFile(self, filename=None, destination_directories=None, create=False):
+    """ Links a specified file to given sub-directories
+
+    Args:
+      filename: a string containing filename to link (basename only)
+      destination_directories: a list containing directories to link to 
+        (basenames only)
+      create: a boolean which if True, will create missing destination 
+        directories
+    Raises:
+      SyntaxError: Bad command arguments
+      IOError: Bad files
+    """
+    if not destination_directories or not filename:
+      raise SyntaxError("Arguments are NOT valid!")
+      
+    source_file = os.path.join(self.root_source, filename)
+    if not os.path.exists(source_file):
+      raise IOError("Source file [%s] does not exist!" % source_file)
+      
+    for directory in destination_directories:
+      location = os.path.join(self.root_destination, directory)
+      target_file = os.path.join(location, filename)
+      
+      if self.debug:
+        print "\nLinkFile: source_file: %s" \
+              "\nLinkFile: target_file: %s" % (source_file, target_file)
+      
+      if not os.path.exists(location):
+        if create:
+          os.mkdir(location)
+        else:
+          raise IOError("Destination directory %s does not exist!" % location)
+      
+      if os.path.exists(target_file):
+        raise IOError("LinkFile: Destination file %s already exists!" % target_file)
+      else:
+        os.symlink(source_file, target_file)
+  
+  def TagFile(self, target_file=None):
+    """ Tags a given file with file information
+    
+    This will tag a file with specific shorthand attributes as specified in
+    the video, audio and combine formats.  This will also remove any existing
+    brackets and their contents ([]) from the file.
+    
+    Args:
+      filename: A validated filename string
+    Raises:
+      SyntaxError: Bad command arguments
+      IOError: Bad file argument
+      OSError: Problem renaming the file
+    Returns:
+      A string containing modified file information, or False if failed.
+    """
+    if not target_file:
+      raise SyntaxError("Arguments NOT Valid!")
+  
+    if not os.path.isfile(target_file):
+      raise IOError("File [%s] not a valid file!" % target_file)
+      
+    file_tag = self.__IdentifyFile(target_file)
+    if file_tag:
+      (dir, file) = os.path.split(target_file)
+      open_bracket = file.rfind("[")
+      if open_bracket != -1:
+        close_bracket = file.rfind("]")
+        if close_bracket != -1:
+          close_bracket += 1
+        file = "%s%s" % (file[:open_bracket].strip(), 
+                         file[close_bracket:].strip())
+        
+      extension_index = file.rfind(".")
+      if extension_index != -1:
+        new_file = "%s/%s %s%s" % (dir,
+                                   file[:extension_index], 
+                                   file_tag, 
+                                   file[extension_index:])
+      else:
+        new_file = "%s/%s %s" % (dir, file, file_tag)
+      
+      if self.debug:
+        print "\nTagFile: target_file: %s" \
+              "\nTagFile: new_file: %s" % (target_file, new_file)
+      
+      os.rename(target_file, new_file)
+      return new_file
+    else:
+      return False
+      
+  def __IdentifyKeyValue(self, haystack=None, search_key=None):
+    """ Returns values for a given key in an __IdentifyFile() string
+    
+    Args:
+      haystack: A string containing the contents to search
+      search_key: A key to find, must be a key in self.format_keys
+    Returns:
+      A substring of haystack where the contents of 'key' are returned, or
+        False if failed
+    Raises:
+      SyntaxError: Bad command arguments
+      KeyError: Bad search key
+    Depends:
+      The *nix 'file' utility.
+    """
+    if not haystack:
+      raise SyntaxError("Arguments NOT valid!")
+    	
+    if search_key not in self.format_keys:
+      raise KeyError("Key [%s] not valid!" % search_key)
+      
+    key_index = haystack.find(search_key)
+    if key_index == -1:
+      return False
+    else:
+      key_index = key_index + len(search_key) + 1
+      
+    for key in self.format_keys:
+      key_index_end = haystack.find(key)
+      if key_index_end != -1 and key_index_end > key_index:
+        break
+        
+    if key_index_end < key_index:
+      key_index_end = None
+    else:
+      key_index_end -= 2
+    
+    if self.debug:
+      print "\nIdentifyKeyValue: key: |%s|" \
+            "\nIdentifyKeyValue: haystack: %s" \
+            "\nIdentifyKeyValue: Key Indicies: %s %s" \
+            "\nIdentifyKeyValue: Return Key: |%s|" % \
+            (search_key, 
+            haystack, 
+            key_index, 
+            key_index_end, 
+            haystack[key_index:key_index_end])
+    
+    return haystack[key_index:key_index_end]
+    
+  def __IdentifyFile(self, target_file=None):
+    """ Identify's a given file's format
+
+    BUG: mp4's are not detected as valid files.
+
+    Args:
+      target_file: A validated filename string
+    Raises:
+      SyntaxError: Bad command arguments
+      IOError: Bad file argument
+      SystemError: File cannot be identified by 'file'
+      AttributeError: File attributes are not in codec dictionaries
+    Returns:
+      A string containing the condensed format information, in the format of
+       [video-audio] or [combine] if the format contains both video and audio.
+    """
+    if not target_file:
+      raise SyntaxError("Arguments are NOT valid!")
+    
+    if not os.path.exists(target_file):
+      raise IOError("Target File [%s] NOT valid!" % target_file)
+
+    else:
+      file_info = commands.getoutput("file -b '%s'" % target_file)
+      if "cannot open" in file_info:
+        raise SystemError("Target File [%s] not identified!" % target_file)
+      else:
+        video_format = self.__IdentifyKeyValue(file_info, "video:")
+        audio_format = self.__IdentifyKeyValue(file_info, "audio:")
+        
+        if self.debug:
+          print "\nIdentifyFile: File: %s" \
+                "\nIdentifyFile: Video: %s" \
+                "\nIdentifyFile: Audio: %s" \
+                "\nIdentifyFile: Format: [%s-%s]" % \
+                (target_file, 
+                video_format, 
+                audio_format,
+                self.video_formats[video_format],
+                self.audio_formats[audio_format])
+         
+        if not video_format and not audio_format:
+          if file_info not in self.combine_formats:
+            raise AttributeError("Unknown format [%s].  Please verify file" \
+                " format and add information." % file_info)
+          else:
+            return "[%s]" % self.combine_formats[file_info]
+        else:
+          if video_format not in self.video_formats:
+            raise AttributeError("Unknown Video format [%s].  Please verify" \
+                " file format and add information." % video_format)
+          if audio_format not in self.audio_formats:
+            raise AttributeError("Unknown Audio format [%s].  Please verify" \
+                " file format and add information." % audio_format)
+        
+          return "[%s-%s]" % (self.video_formats[video_format], 
+                              self.audio_formats[audio_format])
+
+
+if __name__ == "__main__":
+  pass

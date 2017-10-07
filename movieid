@@ -1,0 +1,150 @@
+#!/usr/bin/php -q
+<?
+// Version 1.0
+//
+// movieid [filename|directory]
+//
+// ID's and tags movies with the appropriate abbreviated
+// codecs for video files.
+//
+// Format: filename [<videocodec>-<audiocodec>].ext
+//
+// Pass either a filename, or a directory containing
+// video files to modify.  This is data-safe.
+// ----------------------------------------------------------------------------
+// Recognized Audio, Video, Combined formats.  Add your own if you want.
+// Change only these variables.
+
+// Abbreviations used for known video formats
+$videoformats = array(
+  "Microsoft MPEG-4 v2" => "mp4v2",
+  "Microsoft MPEG-4 v3" => "mp4v3",
+  "XviD" => "XviD",
+  "DivX 5" => "DivX5",
+  "DivX 4" => "DivX4",
+  "DivX 3 Low-Motion" => "DivX3L",
+  "DivX 3 Fast-Motion" => "DivX3F",
+  "DivX (stereo, 44100 Hz)" => "DivX");
+
+// Abbreviations used for known audio formats
+$audioformats = array(
+  "MPEG-1 Layer 3 (stereo" => "mp3",
+  "Dolby AC3 (8 channels" => "8AC3",
+  "Dolby AC3 (7 channels" => "7AC3",
+  "Dolby AC3 (6 channels" => "6AC3",
+  "Dolby AC3 (5 channels" => "5AC3",
+  "Dolby AC3 (4 channels" => "4AC3",
+  "Dolby AC3 (3 channels" => "3AC3",
+  "Dolby AC3 (stereo" => "AC3");
+
+// Abbreviations used for known 'combined' file formats (no distinct video/audio codec)
+$combineformats = array(
+  "Apple QuickTime movie file (ftyp)" => "mp4",
+  "Microsoft ASF" => "wmv",
+  "MPEG system stream data" => "mpeg");
+// ----------------------------------------------------------------------------
+
+$usage = "\nmovieid [filename|directory]\n\nID's and tags movies with the appropriate abbreviated codecs for video files.\n\nFormat: filename [<videocodec>-<audiocodec>].ext\n\nPass either a filename, or a directory containing video files to modify.  This is data-safe.\n\n";
+
+// check to make sure that a filename was passed,if it was, verify that it exists
+if( $argc < 2 ) { die("$usage"); }
+
+// if we are processing a directoy, get the contents of the directory, minus . and ..; ignore directories, and run file tagging.
+if( is_dir($sourcefile = $argv[1]) ) {
+  $sourcedir = opendir("$sourcefile");
+  
+  // add trailing slash if directory exists
+  if( substr($sourcefile,-1) != "/" ) {
+    $dirname = $sourcefile . "/";
+  } else { $dirname = $sourcefile; }
+ 
+  while( false !== ( $file = readdir($sourcedir) ) ) {
+    // verify that the file is not a directoy, . or ..
+    if( $file != "." && $file != ".." && !is_dir($file) ) {
+      _tagFile("$dirname$file",$videoformats,$audioformats,$combineformats);
+    }
+  }
+  closedir($sourcedir);
+} else {
+  // else we are a just processing a single file, process it
+  _tagFile($sourcefile,$videoformats,$audioformats,$combineformats);
+}
+
+
+// Function: _getFileInfo
+// Purpose:  Parses out the attributes of fileinfo and returns them
+// Requires: string - holds the file info results
+//           string - key to look for
+// Returns:  string - containing the text for that attribute of the fileinfo
+function _getFileInfo(&$fileinfo,$key) {
+  // grab the position of the key in the file info listing
+  $startpos = strpos($fileinfo,$key);
+  // grab the length of the key for future offset purposes (account for the blank space)
+  $offset = strlen($key) + 1;
+
+  // if the start position exists
+  if( !($startpos === false) ) { 
+    // grab the data for the key, using , as seperators, and the key offset.
+    $data = substr($fileinfo, $startpos + $offset, ( strpos($fileinfo,",",$startpos + $offset) - ($startpos + $offset) ) );
+  } else {
+    $data = "";
+  }
+
+  return $data;
+}
+
+
+// Function: _tagFile
+// Purpose: Correctly Tags 1 file with the correct information
+// Requires: string - the filename to check
+//           array - video file formats
+//           array - audio file formats
+//           array - combine audio/video file formats
+// Returns: boolean - true if success, false if failure
+Function _tagFile($sourcefile,&$videoformats,&$audioformats,&$combineformats) {
+  // grab the info from file
+  $fileinfo = trim(`/usr/bin/file -b "$sourcefile"`);
+
+  // grab the video / audio information from fileinfo
+  $videoinfo = _getFileInfo($fileinfo,"video:");
+  $audioinfo = _getFileInfo($fileinfo,"audio:");
+
+  // if neither is returned, check for combination codec, otherwise report new filetype found.
+  if( $videoinfo == "" && $audioinfo == "" ) {
+    $combineinfo = "[" . $combineformats[$fileinfo] . "]";
+    if( $combineinfo == "[]" ) {
+      echo "\nUnknown format found: $fileinfo.  \nVideo file: $sourcefile\n\tPlease add to database, if there are no 'video:' or 'audio:' sections in dump, add to the COMBINEFORMATS section.\n\n";
+      return false;
+     }
+  } else {
+    // lookup video / audio information
+    $combineinfo = "[" . $videoformats[$videoinfo] . "-" . $audioformats[$audioinfo] . "]";
+  }   
+
+  // echo contents for debugging
+  //echo "\nVideotype: " . $videoinfo . "\nAudiotype: " . $audioinfo . "\nCombineinfo: " . $combineinfo . "\nFileinfo: " . $fileinfo . "\n";
+
+  // find the first occurance of the bracket from the end of the file
+  $openbracket = strrpos($sourcefile,"[");
+  $closebracket = strrpos($sourcefile,"]");
+
+  // if BOTH are true, and [ occurs before ], then replace content of brackets
+  if( !($openbracket===false) && !($closebracket===false) && $openbracket < $closebracket ) {
+    $newfile = substr($sourcefile,0,$openbracket) . substr($sourcefile,$closebracket+1);
+  } else {
+    $endperiod = strrpos($sourcefile,".");
+    // otherwise, let's add a space before the last . if it doesn't exist (to keep things tidy)
+    if( substr($sourcefile,$endperiod-1,1) != " " ) {
+      $newfile = substr($sourcefile,0,$endperiod) . " " . substr($sourcefile,$endperiod,strlen($sourcefile));
+    }
+  }
+  
+  // add in the combineinfo before the last . (usually before the extension)
+  $newfile = substr($newfile,0,strrpos($newfile,".")) . $combineinfo . substr($newfile,strrpos($newfile,"."),strlen($newfile));
+
+  // Return true if move successful
+  if( !system("mv -v \"$sourcefile\" \"$newfile\"") ) {
+     return false;
+  } else return true;
+}
+?>

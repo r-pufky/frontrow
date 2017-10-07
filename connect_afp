@@ -1,0 +1,36 @@
+#!/usr/bin/perl -w
+#
+# maps specified afp mount points to /Volume safely
+# 
+
+# the mount points you want to mount (array)
+@mounts = ("Music", "Videos", "DiskImages", "Pictures", "Upload");
+# the server to connect to
+$server = "127.0.0.1";
+# the generic keychain keyname
+$keyname = "some-keychain-keyname";
+
+# Only run if we are on the local ethernet nework
+if( system("/sbin/ifconfig en0 inet | /usr/bin/fgrep -q 127.0.0.1") != 0 ) { exit 0 }
+
+# No need to modify anything below
+chomp($username = `/usr/bin/whoami`);
+# grab the password for the mountpoint
+chomp($password = `/usr/bin/security 2>&1 > /dev/null find-generic-password -gs $keyname`);
+@pass = split "\"", $password;
+
+# go through each mount point
+foreach $mount (@mounts) {
+  $mntpnt = "/Volumes/" . $mount;
+
+  # un-mount mountpoint if already mounted.
+  `/sbin/umount $mntpnt > /dev/null 2>&1`;
+  
+  # create the mount directory if it does not exist
+  if( !-d $mntpnt ) { `/bin/mkdir $mntpnt`; }
+  
+  # attempt to mount the mountpoint
+  $connect = "/sbin/mount_afp afp://" . $username . ":" . $pass[1] . "@" . $server . "/" . $mount . " " . $mntpnt . " > /dev/null 2>&1";
+  #print $connect . "\n";
+  `$connect`;
+}
